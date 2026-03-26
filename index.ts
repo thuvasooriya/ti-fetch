@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import TurndownService from "turndown";
 import { join, dirname, extname, basename } from "node:path";
+import { createRequire } from "node:module";
 import MathMLToLaTeX from "mathml-to-latex";
 
 const BASE_URL = "https://www.ti.com";
@@ -114,23 +115,112 @@ async function fetch_all_blocks(
   return blocks.sort((a, b) => a.order - b.order);
 }
 
-// Lazy-load sharp only when --svg-to-webp is used (native module can't be bundled)
+// Lazy-load sharp only when --svg-to-webp is used.
+// For bundle/compiled artifacts, install sharp at runtime in a tool cache when unavailable.
+const SHARP_VERSION = "0.34.5";
+const SHARP_RUNTIME_DIR = (() => {
+  const home_dir = Bun.env.HOME || Bun.env.USERPROFILE || ".";
+  const cache_root = Bun.env.XDG_CACHE_HOME || join(home_dir, ".cache");
+  return join(cache_root, "ti-fetch", "sharp-runtime");
+})();
+
 let _sharp: typeof import("sharp").default | null = null;
-async function get_sharp() {
-  if (!_sharp) {
+let _sharp_loading: Promise<typeof import("sharp").default> | null = null;
+
+function load_sharp_from_runtime_dir(): typeof import("sharp").default {
+  const runtime_require = createRequire(join(SHARP_RUNTIME_DIR, "package.json"));
+  const loaded = runtime_require("sharp") as unknown;
+  const sharp = (loaded as { default?: typeof import("sharp").default }).default ?? (loaded as typeof import("sharp").default);
+
+  if (typeof sharp !== "function") {
+    throw new Error("Sharp module did not resolve to a callable export");
+  }
+
+  return sharp;
+}
+
+async function install_runtime_sharp(): Promise<typeof import("sharp").default> {
+  const package_json_path = join(SHARP_RUNTIME_DIR, "package.json");
+  const sharp_package_json = join(SHARP_RUNTIME_DIR, "node_modules", "sharp", "package.json");
+
+  const runtime_pkg = {
+    name: "ti-fetch-sharp-runtime",
+    private: true,
+    type: "module",
+    dependencies: {
+      sharp: SHARP_VERSION,
+    },
+  };
+
+  await Bun.write(package_json_path, `${JSON.stringify(runtime_pkg, null, 2)}\n`, { createPath: true });
+
+  const install = Bun.spawnSync({
+    cmd: ["bun", "install", "--silent"],
+    cwd: SHARP_RUNTIME_DIR,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  if (install.exitCode !== 0) {
+    const stderr_text = new TextDecoder().decode(install.stderr);
+    throw new Error(
+      `bun install failed in ${SHARP_RUNTIME_DIR} (exit ${install.exitCode}). ${stderr_text.trim()}`
+    );
+  }
+
+  if (!(await Bun.file(sharp_package_json).exists())) {
+    throw new Error(`sharp package missing after install in ${SHARP_RUNTIME_DIR}`);
+  }
+
+  return load_sharp_from_runtime_dir();
+}
+
+async function load_sharp(): Promise<typeof import("sharp").default> {
+  const skip_direct = Bun.env.TI_FETCH_SHARP_SKIP_DIRECT === "1";
+  let direct_msg = skip_direct ? "skipped (TI_FETCH_SHARP_SKIP_DIRECT=1)" : "";
+
+  if (!skip_direct) {
     try {
-      _sharp = (await import("sharp")).default;
-    } catch (err) {
-      const err_msg = err instanceof Error ? err.message : String(err);
-      throw new Error(
-        "Failed to load optional dependency 'sharp' required by --svg-to-webp.\n" +
-        "Install or reinstall it with Bun: bun add sharp\n" +
-        "If this is a release bundle/binary, --svg-to-webp may require running from source with dependencies installed.\n" +
-        `Original error: ${err_msg}`
-      );
+      return (await import("sharp")).default;
+    } catch (direct_err) {
+      direct_msg = direct_err instanceof Error ? direct_err.message : String(direct_err);
     }
   }
-  return _sharp;
+
+  const cached_sharp_package = join(SHARP_RUNTIME_DIR, "node_modules", "sharp", "package.json");
+
+  try {
+    if (await Bun.file(cached_sharp_package).exists()) {
+      try {
+        return load_sharp_from_runtime_dir();
+      } catch {
+        // Corrupted or incomplete cache: reinstall below.
+      }
+    }
+    return await install_runtime_sharp();
+  } catch (runtime_err) {
+    const runtime_msg = runtime_err instanceof Error ? runtime_err.message : String(runtime_err);
+    throw new Error(
+      "Failed to load optional dependency 'sharp' required by --svg-to-webp.\n" +
+      "ti-fetch bundle runs with Bun (not Node). npm/node lines in nested errors are emitted by sharp itself.\n" +
+      "Tried loading local sharp and runtime-installing sharp with Bun.\n" +
+      `Direct load error: ${direct_msg}\n` +
+      `Runtime install error: ${runtime_msg}`
+    );
+  }
+}
+
+async function get_sharp(): Promise<typeof import("sharp").default> {
+  if (_sharp) return _sharp;
+  if (_sharp_loading) return _sharp_loading;
+
+  _sharp_loading = load_sharp();
+  try {
+    _sharp = await _sharp_loading;
+    return _sharp;
+  } finally {
+    _sharp_loading = null;
+  }
 }
 
 async function download_image(url: string, local_path: string, convert_to_webp: boolean = false): Promise<string> {

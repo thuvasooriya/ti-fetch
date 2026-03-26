@@ -29,7 +29,14 @@ curl -L https://github.com/thuvasooriya/ti-fetch/releases/latest/download/ti-fet
 chmod +x ~/.local/bin/ti-fetch
 ```
 
-Note: The bundle requires `bun` to be in your PATH. `--svg-to-webp` also requires the optional `sharp` dependency (`bun add sharp`).
+Note: The bundle requires `bun` to be in your PATH. For `--svg-to-webp`, ti-fetch attempts to bootstrap `sharp` into `~/.cache/ti-fetch/sharp-runtime` on first use.
+
+If bootstrapping fails, install manually with:
+```bash
+bun add sharp
+```
+
+Sharp may print npm/node-oriented diagnostic text; this is from sharp itself. The ti-fetch bundle is executed by Bun (`#!/usr/bin/env bun`).
 
 ### Pre-built binaries (standalone)
 
