@@ -42,7 +42,6 @@ async function extract_toc(url: string): Promise<DatasheetInfo> {
   const title_match = html.match(/<title>([^<]+)<\/title>/);
   const title = title_match?.[1]?.replace(/\s*\|\s*TI\.com\s*$/, "").trim() || product;
 
-  // expanded pattern to match all GUID formats including XXXXXXXX and alphanumeric
   const guid_pattern = new RegExp(
     `href="//www\\.ti\\.com/document-viewer/${product}/${doc_type}/(GUID-[A-Za-z0-9-]+)`,
     "gi"
@@ -97,7 +96,6 @@ async function fetch_all_blocks(
       const [order, guid] = item;
       const block = await fetch_block(info.product, doc_type, guid, order);
       blocks.push(block);
-      // in-place progress update
       process.stderr.write(`\r[*] Progress: ${blocks.length}/${total}`);
     }
   });
@@ -107,7 +105,7 @@ async function fetch_all_blocks(
   return blocks.sort((a, b) => a.order - b.order);
 }
 
-function create_turndown(doc_id: string): TurndownService {
+function create_turndown(): TurndownService {
   const td = new TurndownService({
     headingStyle: "atx",
     codeBlockStyle: "fenced",
@@ -139,14 +137,16 @@ function create_turndown(doc_id: string): TurndownService {
     replacement: (content) => content.trim() + " ",
   });
 
+  // use HTML tags for subscript (works in GFM, ~~ is strikethrough)
   td.addRule("subscript", {
     filter: "sub",
-    replacement: (content) => `~${content}~`,
+    replacement: (content) => `<sub>${content}</sub>`,
   });
 
+  // use HTML tags for superscript
   td.addRule("superscript", {
     filter: "sup",
-    replacement: (content) => `^${content}^`,
+    replacement: (content) => `<sup>${content}</sup>`,
   });
 
   // skip tables - handled separately
@@ -170,15 +170,13 @@ function decode_html_entities(text: string): string {
 }
 
 function extract_cell_text(cell_html: string): string {
-  // remove nested tags but keep text content
   let text = cell_html
-    .replace(/<sub[^>]*>([\s\S]*?)<\/sub>/gi, "~$1~")
-    .replace(/<sup[^>]*>([\s\S]*?)<\/sup>/gi, "^$1^")
+    .replace(/<sub[^>]*>([\s\S]*?)<\/sub>/gi, "<sub>$1</sub>")
+    .replace(/<sup[^>]*>([\s\S]*?)<\/sup>/gi, "<sup>$1</sup>")
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   text = decode_html_entities(text);
-  // escape pipe characters for markdown tables
   text = text.replace(/\|/g, "\\|");
   return text;
 }
@@ -187,14 +185,12 @@ function convert_table_html(table_html: string): string {
   const rows: string[][] = [];
   let max_cols = 0;
 
-  // match rows - handle both thead and tbody rows
   const row_regex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
   let row_match;
   while ((row_match = row_regex.exec(table_html)) !== null) {
     const row_html = row_match[1];
     const cells: string[] = [];
 
-    // extract cells (th or td) - handle complex attributes
     const cell_regex = /<(th|td)[^>]*>([\s\S]*?)<\/\1>/gi;
     let cell_match;
     while ((cell_match = cell_regex.exec(row_html)) !== null) {
@@ -210,18 +206,15 @@ function convert_table_html(table_html: string): string {
 
   if (rows.length === 0 || max_cols === 0) return "";
 
-  // skip tables where all cells are empty
   const has_content = rows.some((row) => row.some((cell) => cell.length > 0));
   if (!has_content) return "";
 
-  // pad rows to max columns
   for (const row of rows) {
     while (row.length < max_cols) {
       row.push("");
     }
   }
 
-  // build markdown table
   const lines: string[] = [];
   const header = rows[0];
   lines.push("| " + header.join(" | ") + " |");
@@ -236,7 +229,7 @@ function convert_table_html(table_html: string): string {
 
 function extract_tables(html: string): { html: string; tables: string[] } {
   const tables: string[] = [];
-  const placeholder_prefix = "TABLEPLACEHOLDER"
+  const placeholder_prefix = "TABLEPLACEHOLDER";
   let counter = 0;
 
   const processed_html = html.replace(/<table[^>]*>[\s\S]*?<\/table>/gi, (match) => {
@@ -253,19 +246,16 @@ function extract_tables(html: string): { html: string; tables: string[] } {
 }
 
 function clean_html(html: string): string {
-  // try to extract content div
   const content_match = html.match(/<div[^>]*class="[^"]*subsection[^"]*"[^>]*>[\s\S]*$/);
   if (content_match) {
     html = content_match[0];
   }
 
-  // also try title div
   const title_match = html.match(/<div[^>]*class="[^"]*doc-type[^"]*"[^>]*>[\s\S]*$/);
   if (title_match) {
     html = title_match[0];
   }
 
-  // remove script and style tags
   html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "");
   html = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
   html = html.replace(/\s+xmlns:[a-z]+="[^"]*"/gi, "");
@@ -273,8 +263,24 @@ function clean_html(html: string): string {
   return html;
 }
 
+// clean up markdown artifacts from turndown
+function post_process_markdown(md: string): string {
+  // remove unnecessary backslash escapes before underscores in identifiers
+  // pattern: letter/number followed by \_ followed by letter/number
+  md = md.replace(/([A-Za-z0-9])\\_([A-Za-z0-9])/g, "$1_$2");
+  
+  // clean up multiple consecutive escapes
+  md = md.replace(/\\_\\_/g, "__");
+  
+  // normalize whitespace around HTML sub/sup tags
+  md = md.replace(/\s*<(sub|sup)>\s*/g, "<$1>");
+  md = md.replace(/\s*<\/(sub|sup)>\s*/g, "</$1>");
+  
+  return md;
+}
+
 function convert_to_markdown(blocks: ContentBlock[], info: DatasheetInfo): string {
-  const td = create_turndown(info.doc_id);
+  const td = create_turndown();
   const sections: string[] = [];
 
   sections.push(`# ${info.title}\n`);
@@ -289,16 +295,16 @@ function convert_to_markdown(blocks: ContentBlock[], info: DatasheetInfo): strin
     const cleaned = clean_html(block.html);
     if (!cleaned.trim()) continue;
 
-    // extract tables first, replace with placeholders
     const { html: html_without_tables, tables } = extract_tables(cleaned);
 
     try {
       let md = td.turndown(html_without_tables);
 
-      // restore tables from placeholders
       for (let i = 0; i < tables.length; i++) {
         md = md.replace(`TABLEPLACEHOLDER${i}`, tables[i]);
       }
+
+      md = post_process_markdown(md);
 
       if (md.trim()) {
         sections.push(md);
