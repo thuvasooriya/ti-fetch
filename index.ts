@@ -16,7 +16,6 @@ interface ContentBlock {
   order: number;
 }
 
-// extract product name and document type from URL
 function parse_url(url: string): { product: string; doc_type: string } {
   const match = url.match(/document-viewer\/([^/]+)\/(\w+)/i);
   if (!match) {
@@ -25,12 +24,11 @@ function parse_url(url: string): { product: string; doc_type: string } {
   return { product: match[1].toUpperCase(), doc_type: match[2] };
 }
 
-// fetch the main page and extract ordered GUIDs from TOC
 async function extract_toc(url: string): Promise<DatasheetInfo> {
   const { product, doc_type } = parse_url(url);
   const normalized_url = `${BASE_URL}/document-viewer/${product}/${doc_type}`;
 
-  console.error(`[*] Fetching TOC from ${normalized_url}`);
+  process.stderr.write(`[*] Fetching TOC from ${normalized_url}\n`);
   const response = await fetch(normalized_url);
   if (!response.ok) {
     throw new Error(`Failed to fetch TOC: ${response.status}`);
@@ -38,17 +36,15 @@ async function extract_toc(url: string): Promise<DatasheetInfo> {
 
   const html = await response.text();
 
-  // extract document ID from image paths (e.g., SLLSFV1)
   const doc_id_match = html.match(/\/ods\/images\/([A-Z0-9]+)\//);
   const doc_id = doc_id_match?.[1] || product;
 
-  // extract title
   const title_match = html.match(/<title>([^<]+)<\/title>/);
   const title = title_match?.[1]?.replace(/\s*\|\s*TI\.com\s*$/, "").trim() || product;
 
-  // extract ordered GUIDs from TOC hrefs
+  // expanded pattern to match all GUID formats including XXXXXXXX and alphanumeric
   const guid_pattern = new RegExp(
-    `href="//www\\.ti\\.com/document-viewer/${product}/${doc_type}/(GUID-[A-F0-9-]+)`,
+    `href="//www\\.ti\\.com/document-viewer/${product}/${doc_type}/(GUID-[A-Za-z0-9-]+)`,
     "gi"
   );
   const guids: string[] = [];
@@ -63,11 +59,10 @@ async function extract_toc(url: string): Promise<DatasheetInfo> {
     }
   }
 
-  console.error(`[*] Found ${guids.length} sections`);
+  process.stderr.write(`[*] Found ${guids.length} sections\n`);
   return { product, doc_id, title, guids };
 }
 
-// fetch a single content block by GUID
 async function fetch_block(
   product: string,
   doc_type: string,
@@ -77,14 +72,13 @@ async function fetch_block(
   const url = `${BASE_URL}/document-viewer/${product}/${doc_type}/${guid}?raw=1`;
   const response = await fetch(url);
   if (!response.ok) {
-    console.error(`[!] Failed to fetch ${guid}: ${response.status}`);
+    process.stderr.write(`\n[!] Failed to fetch ${guid}: ${response.status}\n`);
     return { guid, html: "", order };
   }
   const html = await response.text();
   return { guid, html, order };
 }
 
-// fetch all content blocks in parallel with concurrency limit
 async function fetch_all_blocks(
   info: DatasheetInfo,
   doc_type: string,
@@ -92,8 +86,9 @@ async function fetch_all_blocks(
 ): Promise<ContentBlock[]> {
   const blocks: ContentBlock[] = [];
   const queue = [...info.guids.entries()];
+  const total = queue.length;
 
-  console.error(`[*] Fetching ${queue.length} sections (concurrency: ${concurrency})`);
+  process.stderr.write(`[*] Fetching ${total} sections (concurrency: ${concurrency})\n`);
 
   const workers = Array.from({ length: concurrency }, async () => {
     while (queue.length > 0) {
@@ -102,17 +97,16 @@ async function fetch_all_blocks(
       const [order, guid] = item;
       const block = await fetch_block(info.product, doc_type, guid, order);
       blocks.push(block);
-      if (blocks.length % 20 === 0) {
-        console.error(`[*] Progress: ${blocks.length}/${info.guids.length}`);
-      }
+      // in-place progress update
+      process.stderr.write(`\r[*] Progress: ${blocks.length}/${total}`);
     }
   });
 
   await Promise.all(workers);
+  process.stderr.write(`\r[*] Progress: ${total}/${total}\n`);
   return blocks.sort((a, b) => a.order - b.order);
 }
 
-// configure turndown for optimal datasheet conversion
 function create_turndown(doc_id: string): TurndownService {
   const td = new TurndownService({
     headingStyle: "atx",
@@ -120,7 +114,6 @@ function create_turndown(doc_id: string): TurndownService {
     bulletListMarker: "-",
   });
 
-  // handle images with full URLs
   td.addRule("images", {
     filter: "img",
     replacement: (_content, node) => {
@@ -128,82 +121,84 @@ function create_turndown(doc_id: string): TurndownService {
       const src = el.getAttribute("src") || "";
       const alt = el.getAttribute("alt")?.replace(/\n/g, " ") || "";
       const title = el.getAttribute("title")?.replace(/\n/g, " ") || "";
-
-      // convert relative URLs to absolute
       const full_src = src.startsWith("/") ? `${BASE_URL}${src}` : src;
       const caption = title || alt;
       return caption ? `![${caption}](${full_src})` : `![](${full_src})`;
     },
   });
 
-  // handle figure captions
   td.addRule("figcaption", {
     filter: (node) =>
       node.nodeName === "SPAN" && node.classList?.contains("caption"),
     replacement: (content) => `\n\n**${content.trim()}**\n\n`,
   });
 
-  // handle section labels (e.g., "5.1")
   td.addRule("section-label", {
     filter: (node) =>
       node.nodeName === "SPAN" && node.classList?.contains("section-label"),
     replacement: (content) => content.trim() + " ",
   });
 
-  // handle subscripts
   td.addRule("subscript", {
     filter: "sub",
     replacement: (content) => `~${content}~`,
   });
 
-  // handle superscripts
   td.addRule("superscript", {
     filter: "sup",
     replacement: (content) => `^${content}^`,
   });
 
-  // tables handled via regex in clean_html, skip turndown's default
-  td.addRule("table", {
+  // skip tables - handled separately
+  td.addRule("skip-table", {
     filter: "table",
-    replacement: (_content, node) => {
-      // fallback: just get text content if regex didn't catch it
-      const text = node.textContent || "";
-      return text.trim() ? `\n\n${text.trim()}\n\n` : "";
-    },
+    replacement: () => "",
   });
 
   return td;
 }
 
-// storage for extracted tables during processing
-const table_store = new Map<string, string>();
+function decode_html_entities(text: string): string {
+  return text
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)));
+}
 
-// convert HTML table to markdown table using regex
+function extract_cell_text(cell_html: string): string {
+  // remove nested tags but keep text content
+  let text = cell_html
+    .replace(/<sub[^>]*>([\s\S]*?)<\/sub>/gi, "~$1~")
+    .replace(/<sup[^>]*>([\s\S]*?)<\/sup>/gi, "^$1^")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  text = decode_html_entities(text);
+  // escape pipe characters for markdown tables
+  text = text.replace(/\|/g, "\\|");
+  return text;
+}
+
 function convert_table_html(table_html: string): string {
   const rows: string[][] = [];
   let max_cols = 0;
 
-  // extract all rows
+  // match rows - handle both thead and tbody rows
   const row_regex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
   let row_match;
   while ((row_match = row_regex.exec(table_html)) !== null) {
     const row_html = row_match[1];
     const cells: string[] = [];
 
-    // extract cells (th or td)
-    const cell_regex = /<t[hd][^>]*>([\s\S]*?)<\/t[hd]>/gi;
+    // extract cells (th or td) - handle complex attributes
+    const cell_regex = /<(th|td)[^>]*>([\s\S]*?)<\/\1>/gi;
     let cell_match;
     while ((cell_match = cell_regex.exec(row_html)) !== null) {
-      // strip HTML tags and clean whitespace
-      const text = cell_match[1]
-        .replace(/<[^>]+>/g, "")
-        .replace(/&nbsp;/g, " ")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&amp;/g, "&")
-        .replace(/\s+/g, " ")
-        .replace(/\|/g, "\\|")
-        .trim();
+      const text = extract_cell_text(cell_match[2]);
       cells.push(text);
     }
 
@@ -215,7 +210,7 @@ function convert_table_html(table_html: string): string {
 
   if (rows.length === 0 || max_cols === 0) return "";
 
-  // skip tables where all cells are empty (used for figure spacing)
+  // skip tables where all cells are empty
   const has_content = rows.some((row) => row.some((cell) => cell.length > 0));
   if (!has_content) return "";
 
@@ -236,54 +231,52 @@ function convert_table_html(table_html: string): string {
     lines.push("| " + rows[i].join(" | ") + " |");
   }
 
-  const table_md = "\n\n" + lines.join("\n") + "\n\n";
-  const placeholder = `TBLPLACEHOLDER${Date.now()}X${Math.random().toString(36).slice(2)}END`;
-  table_store.set(placeholder, table_md);
-  return placeholder;
+  return "\n\n" + lines.join("\n") + "\n\n";
 }
 
+function extract_tables(html: string): { html: string; tables: string[] } {
+  const tables: string[] = [];
+  const placeholder_prefix = "TABLEPLACEHOLDER"
+  let counter = 0;
 
-// clean HTML before conversion, extracting tables
+  const processed_html = html.replace(/<table[^>]*>[\s\S]*?<\/table>/gi, (match) => {
+    const md = convert_table_html(match);
+    if (md) {
+      const placeholder = `${placeholder_prefix}${counter++}`;
+      tables.push(md);
+      return placeholder;
+    }
+    return "";
+  });
+
+  return { html: processed_html, tables };
+}
+
 function clean_html(html: string): string {
-  // extract just the content div, skip meta tags
+  // try to extract content div
   const content_match = html.match(/<div[^>]*class="[^"]*subsection[^"]*"[^>]*>[\s\S]*$/);
   if (content_match) {
     html = content_match[0];
   }
 
-  // also try to get title div
+  // also try title div
   const title_match = html.match(/<div[^>]*class="[^"]*doc-type[^"]*"[^>]*>[\s\S]*$/);
   if (title_match) {
     html = title_match[0];
   }
 
-  // remove script tags
+  // remove script and style tags
   html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "");
-
-  // remove style tags
   html = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
-
-  // remove xmlns attributes
   html = html.replace(/\s+xmlns:[a-z]+="[^"]*"/gi, "");
-
-  // convert tables to markdown and store with placeholders
-  html = html.replace(/<table[^>]*>[\s\S]*?<\/table>/gi, (match) => {
-    const md = convert_table_html(match);
-    if (md && md.startsWith("TBLPLACEHOLDER")) {
-      return md;
-    }
-    return "";
-  });
 
   return html;
 }
 
-// convert blocks to markdown
 function convert_to_markdown(blocks: ContentBlock[], info: DatasheetInfo): string {
   const td = create_turndown(info.doc_id);
   const sections: string[] = [];
 
-  // add document header
   sections.push(`# ${info.title}\n`);
   sections.push(`**Product:** ${info.product}\n`);
   sections.push(`**Document ID:** ${info.doc_id}\n`);
@@ -293,31 +286,32 @@ function convert_to_markdown(blocks: ContentBlock[], info: DatasheetInfo): strin
   for (const block of blocks) {
     if (!block.html) continue;
 
-    // clear table store for each block
-    table_store.clear();
-
     const cleaned = clean_html(block.html);
     if (!cleaned.trim()) continue;
 
+    // extract tables first, replace with placeholders
+    const { html: html_without_tables, tables } = extract_tables(cleaned);
+
     try {
-      let md = td.turndown(cleaned);
-      // restore tables from store
-      md = md.replace(/TBLPLACEHOLDER[a-z0-9X]+END/gi, (placeholder) => {
-        return table_store.get(placeholder) || "";
-      });
+      let md = td.turndown(html_without_tables);
+
+      // restore tables from placeholders
+      for (let i = 0; i < tables.length; i++) {
+        md = md.replace(`TABLEPLACEHOLDER${i}`, tables[i]);
+      }
+
       if (md.trim()) {
         sections.push(md);
         sections.push("\n");
       }
     } catch (err) {
-      console.error(`[!] Failed to convert block ${block.guid}: ${err}`);
+      process.stderr.write(`\n[!] Failed to convert block ${block.guid}: ${err}\n`);
     }
   }
 
   return sections.join("\n").replace(/\n{4,}/g, "\n\n\n");
 }
 
-// main entry point
 async function main() {
   const args = process.argv.slice(2);
 
@@ -360,36 +354,31 @@ Examples:
   }
 
   if (!url) {
-    console.error("Error: URL required");
+    process.stderr.write("Error: URL required\n");
     process.exit(1);
   }
 
   const { doc_type } = parse_url(url);
   const start = performance.now();
 
-  // step 1: extract TOC
   const info = await extract_toc(url);
-
-  // step 2: fetch all blocks
   const blocks = await fetch_all_blocks(info, doc_type, concurrency);
 
-  // step 3: convert to markdown
-  console.error(`[*] Converting to Markdown...`);
+  process.stderr.write(`[*] Converting to Markdown...\n`);
   const markdown = convert_to_markdown(blocks, info);
 
   const elapsed = ((performance.now() - start) / 1000).toFixed(2);
-  console.error(`[*] Done in ${elapsed}s`);
+  process.stderr.write(`[*] Done in ${elapsed}s\n`);
 
-  // output
   if (output) {
     await Bun.write(output, markdown);
-    console.error(`[*] Written to ${output}`);
+    process.stderr.write(`[*] Written to ${output}\n`);
   } else {
     console.log(markdown);
   }
 }
 
 main().catch((err) => {
-  console.error(`Error: ${err.message}`);
+  process.stderr.write(`Error: ${err.message}\n`);
   process.exit(1);
 });
