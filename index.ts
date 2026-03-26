@@ -117,8 +117,8 @@ function create_turndown(): TurndownService {
     replacement: (_content, node) => {
       const el = node as HTMLImageElement;
       const src = el.getAttribute("src") || "";
-      const alt = el.getAttribute("alt")?.replace(/\n/g, " ") || "";
-      const title = el.getAttribute("title")?.replace(/\n/g, " ") || "";
+      const alt = (el.getAttribute("alt") || "").replace(/\s+/g, " ").trim();
+      const title = (el.getAttribute("title") || "").replace(/\s+/g, " ").trim();
       const full_src = src.startsWith("/") ? `${BASE_URL}${src}` : src;
       const caption = title || alt;
       return caption ? `![${caption}](${full_src})` : `![](${full_src})`;
@@ -137,19 +137,16 @@ function create_turndown(): TurndownService {
     replacement: (content) => content.trim() + " ",
   });
 
-  // use HTML tags for subscript (works in GFM, ~~ is strikethrough)
   td.addRule("subscript", {
     filter: "sub",
     replacement: (content) => `<sub>${content}</sub>`,
   });
 
-  // use HTML tags for superscript
   td.addRule("superscript", {
     filter: "sup",
     replacement: (content) => `<sup>${content}</sup>`,
   });
 
-  // skip tables - handled separately
   td.addRule("skip-table", {
     filter: "table",
     replacement: () => "",
@@ -170,12 +167,15 @@ function decode_html_entities(text: string): string {
 }
 
 function extract_cell_text(cell_html: string): string {
+  // preserve sub/sup tags, convert to HTML entities
   let text = cell_html
     .replace(/<sub[^>]*>([\s\S]*?)<\/sub>/gi, "<sub>$1</sub>")
     .replace(/<sup[^>]*>([\s\S]*?)<\/sup>/gi, "<sup>$1</sup>")
-    .replace(/<[^>]+>/g, " ")
+    // remove all other tags but keep text
+    .replace(/<(?!\/?(sub|sup)\b)[^>]+>/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
+  
   text = decode_html_entities(text);
   text = text.replace(/\|/g, "\\|");
   return text;
@@ -263,18 +263,22 @@ function clean_html(html: string): string {
   return html;
 }
 
-// clean up markdown artifacts from turndown
 function post_process_markdown(md: string): string {
   // remove unnecessary backslash escapes before underscores in identifiers
-  // pattern: letter/number followed by \_ followed by letter/number
   md = md.replace(/([A-Za-z0-9])\\_([A-Za-z0-9])/g, "$1_$2");
-  
-  // clean up multiple consecutive escapes
   md = md.replace(/\\_\\_/g, "__");
   
-  // normalize whitespace around HTML sub/sup tags
-  md = md.replace(/\s*<(sub|sup)>\s*/g, "<$1>");
-  md = md.replace(/\s*<\/(sub|sup)>\s*/g, "</$1>");
+  // remove unnecessary backslashes before = in equations
+  md = md.replace(/\\=/g, "=");
+  
+  // remove unnecessary backslashes before * (multiplication)
+  md = md.replace(/\\\*/g, "*");
+  
+  // fix excessive spacing in equations (C U R R E N T -> CURRENT)
+  md = md.replace(/([A-Z])\s{2,}([A-Z])/g, "$1$2");
+  
+  // fix spaced subscript references like ( i q ) -> (i_q)
+  md = md.replace(/\(\s*([a-z])\s+([a-z])\s*\)/g, "($1_$2)");
   
   return md;
 }
