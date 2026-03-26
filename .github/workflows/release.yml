@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build all binaries
+        run: |
+          mkdir -p release
+          bun build --compile --minify --bytecode --target=bun-linux-x64 ./index.ts --outfile ti-fetch-linux-x64
+          bun build --compile --minify --bytecode --target=bun-linux-arm64 ./index.ts --outfile ti-fetch-linux-arm64
+          bun build --compile --minify --bytecode --target=bun-darwin-x64 ./index.ts --outfile ti-fetch-darwin-x64
+          bun build --compile --minify --bytecode --target=bun-darwin-arm64 ./index.ts --outfile ti-fetch-darwin-arm64
+          bun build --target=bun --minify ./index.ts --outfile release/ti-fetch
+          tar -czvf release/ti-fetch-linux-x64.tar.gz ti-fetch-linux-x64
+          tar -czvf release/ti-fetch-linux-arm64.tar.gz ti-fetch-linux-arm64
+          tar -czvf release/ti-fetch-darwin-x64.tar.gz ti-fetch-darwin-x64
+          tar -czvf release/ti-fetch-darwin-arm64.tar.gz ti-fetch-darwin-arm64
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
