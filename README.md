@@ -16,6 +16,19 @@ TI's document viewer uses lazy-loading, rendering content in blocks as you scrol
 
 ## Installation
 
+The following commands assume you have `$HOME/.local/bin` in your PATH.
+
+### Bundle (~250KB, requires Bun)
+
+If you have [Bun](https://bun.sh) installed, use the lightweight bundle:
+
+```bash
+curl -L https://github.com/user/ti-fetch/releases/latest/download/ti-fetch -o ~/.local/bin/ti-fetch
+chmod +x ~/.local/bin/ti-fetch
+```
+
+Note: The bundle requires `bun` to be in your PATH.
+
 ### Pre-built binaries (~60MB, standalone)
 
 Download from [Releases](https://github.com/user/ti-fetch/releases):
@@ -38,17 +51,6 @@ curl -L https://github.com/user/ti-fetch/releases/latest/download/ti-fetch-linux
 mv ti-fetch-linux-x64 ~/.local/bin/ti-fetch
 ```
 
-### Bundle (~250KB, requires Bun)
-
-If you have [Bun](https://bun.sh) installed, use the lightweight bundle:
-
-```bash
-curl -L https://github.com/user/ti-fetch/releases/latest/download/ti-fetch -o ~/.local/bin/ti-fetch
-chmod +x ~/.local/bin/ti-fetch
-```
-
-Note: The bundle requires `bun` to be in your PATH. Run with `bun ~/.local/bin/ti-fetch`.
-
 ### From source
 
 ```bash
@@ -64,12 +66,6 @@ bun run build        # standalone binary
 bun run build:bundle # lightweight bundle (requires bun)
 ```
 
-### Via bunx
-
-```bash
-bunx ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet
-```
-
 ## Usage
 
 ```bash
@@ -78,17 +74,17 @@ ti-fetch <url> [options]
 
 ### Arguments
 
-| Argument | Description |
-|----------|-------------|
-| `url` | TI document viewer URL |
+| Argument | Description            |
+| -------- | ---------------------- |
+| `url`    | TI document viewer URL |
 
 ### Options
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `-o, --output FILE` | Output file path | stdout |
-| `-c, --concurrency N` | Parallel requests | 10 |
-| `-h, --help` | Show help | |
+| Option                | Description       | Default |
+| --------------------- | ----------------- | ------- |
+| `-o, --output FILE`   | Output file path  | stdout  |
+| `-c, --concurrency N` | Parallel requests | 10      |
+| `-h, --help`          | Show help         |         |
 
 ### Examples
 
@@ -125,17 +121,18 @@ The generated Markdown includes:
 
 ---
 
-# 1  Features
+# 1 Features
 
 - AEC-Q100 qualified for automotive applications
   - Temperature Grade-1: -40C to 125C
 - Three-phase BLDC gate driver...
 
-## 5.1  Absolute Maximum Ratings
+## 5.1 Absolute Maximum Ratings
 
-| Parameter | Min | Max | Unit |
-| --- | --- | --- | --- |
-| PVDD | -0.3 | 70 | V |
+| Parameter | Min  | Max | Unit |
+| --------- | ---- | --- | ---- |
+| PVDD      | -0.3 | 70  | V    |
+
 ...
 ```
 
@@ -171,10 +168,10 @@ bun run build:darwin-arm64
 
 ### Build size comparison
 
-| Build Mode | Size | Notes |
-|------------|------|-------|
-| `--compile --minify --bytecode` | ~60MB | Standalone, embeds Bun runtime |
-| `--target=bun --minify` | ~250KB | Requires `bun` in PATH |
+| Build Mode                      | Size   | Notes                          |
+| ------------------------------- | ------ | ------------------------------ |
+| `--compile --minify --bytecode` | ~60MB  | Standalone, embeds Bun runtime |
+| `--target=bun --minify`         | ~250KB | Requires `bun` in PATH         |
 
 The standalone binary embeds the full Bun runtime (~58MB base). The `--minify` flag reduces the JS bundle size. The `--bytecode` flag pre-compiles to bytecode for faster startup.
 
@@ -190,6 +187,7 @@ git push origin v1.0.0
 ```
 
 The GitHub Action builds binaries for all platforms and creates a release with:
+
 - `ti-fetch-darwin-arm64.tar.gz` (macOS Apple Silicon)
 - `ti-fetch-darwin-x64.tar.gz` (macOS Intel)
 - `ti-fetch-linux-arm64.tar.gz` (Linux ARM64)
