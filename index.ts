@@ -1,5 +1,8 @@
 #!/usr/bin/env bun
 import TurndownService from "turndown";
+import sharp from "sharp";
+import { join, dirname, extname, basename } from "node:path";
+import MathMLToLaTeX from "mathml-to-latex";
 
 const BASE_URL = "https://www.ti.com";
 
@@ -15,6 +18,13 @@ interface ContentBlock {
   html: string;
   order: number;
 }
+
+interface ImageInfo {
+  url: string;
+  local_path: string;
+  relative_path: string;
+}
+
 
 function parse_url(url: string): { product: string; doc_type: string } {
   const match = url.match(/document-viewer\/([^/]+)\/(\w+)/i);
@@ -105,6 +115,97 @@ async function fetch_all_blocks(
   return blocks.sort((a, b) => a.order - b.order);
 }
 
+async function download_image(url: string, local_path: string, convert_to_webp: boolean = false): Promise<string> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download image: ${url}`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const ext = extname(url).toLowerCase();
+
+  // Convert SVG to WebP if requested
+  if (convert_to_webp && ext === ".svg") {
+    const webp_path = local_path.replace(/\.svg$/i, ".webp");
+    await Bun.write(webp_path, new Uint8Array(), { createPath: true });
+    await sharp(buffer).webp({ quality: 90 }).toFile(webp_path);
+    return webp_path;
+  }
+
+  // Otherwise save as-is
+  await Bun.write(local_path, buffer, { createPath: true });
+  return local_path;
+}
+
+async function download_images(
+  markdown: string,
+  output_path: string,
+  convert_svg: boolean,
+  concurrency: number
+ ): Promise<string> {
+  const output_dir = dirname(output_path);
+  const assets_dir = join(output_dir, "assets");
+
+
+  // Extract all image URLs
+  const image_pattern = /!\[([^\]]*)\]\(([^)]+)\)/g;
+  const images: ImageInfo[] = [];
+  let match;
+
+  while ((match = image_pattern.exec(markdown)) !== null) {
+    const url = match[2];
+    if (!url.startsWith("http")) continue; // Skip already-local images
+
+    const filename = basename(url).replace(/\?.*$/, ""); // Remove query params
+    const local_path = join(assets_dir, filename);
+    const relative_path = `assets/${filename}`;
+
+    images.push({ url, local_path, relative_path });
+  }
+
+  if (images.length === 0) {
+    return markdown;
+  }
+
+  process.stderr.write(`[*] Downloading ${images.length} images...\n`);
+
+  // Download images with concurrency
+  const download_queue = [...images];
+  const results = new Map<string, string>(); // url -> relative_path
+  let completed = 0;
+  const worker_count = Math.max(1, Math.min(concurrency, 10));
+
+  const workers = Array.from({ length: worker_count }, async () => {
+    while (download_queue.length > 0) {
+      const img = download_queue.shift();
+      if (!img) break;
+
+      try {
+        const actual_path = await download_image(img.url, img.local_path, convert_svg);
+        const actual_filename = basename(actual_path);
+        const actual_relative = `assets/${actual_filename}`;
+        results.set(img.url, actual_relative);
+        completed++;
+        process.stderr.write(`\r[*] Downloaded: ${completed}/${images.length}`);
+      } catch (err) {
+        process.stderr.write(`\n[!] Failed to download ${img.url}: ${err}\n`);
+        results.set(img.url, img.url); // Keep original URL on failure
+      }
+    }
+  });
+
+  await Promise.all(workers);
+  process.stderr.write(`\n`);
+
+  // Replace URLs in markdown
+  let updated = markdown;
+  for (const [url, relative_path] of results.entries()) {
+    updated = updated.replace(new RegExp(`\\]\\(${url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`, "g"), `](${relative_path})`);
+  }
+
+  return updated;
+}
+
 function create_turndown(): TurndownService {
   const td = new TurndownService({
     headingStyle: "atx",
@@ -121,6 +222,7 @@ function create_turndown(): TurndownService {
       const title = (el.getAttribute("title") || "").replace(/\s+/g, " ").trim();
       const full_src = src.startsWith("/") ? `${BASE_URL}${src}` : src;
       const caption = title || alt;
+      // Always use full URL initially - will be replaced later if download_images is true
       return caption ? `![${caption}](${full_src})` : `![](${full_src})`;
     },
   });
@@ -245,6 +347,96 @@ function extract_tables(html: string): { html: string; tables: string[] } {
   return { html: processed_html, tables };
 }
 
+function mathml_to_latex(mathml: string): string {
+  try {
+    // Add xmlns if missing
+    if (!mathml.includes('xmlns')) {
+      mathml = mathml.replace('<math', '<math xmlns="http://www.w3.org/1998/Math/MathML"');
+    }
+    
+    // Decode HTML entities
+    mathml = mathml
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
+      .replace(/&#xA0;/g, ' ');
+    
+    let latex = MathMLToLaTeX.MathMLToLaTeX.convert(mathml);
+    
+    // Normalize converter artifacts
+    latex = latex.replace(/\\textrm\{\s*\}/g, " ");
+    latex = latex.replace(/\\left\(\s*\\right\.\s*/g, "(");
+    latex = latex.replace(/\s*\\left\.\s*\\right\)/g, ")");
+    latex = latex.replace(/\\underline\s*/g, "_");
+    latex = latex.replace(/\\_/g, "_");
+    
+    // Join split identifiers emitted as letter-by-letter tokens
+    let previous = "";
+    while (latex !== previous) {
+      previous = latex;
+      latex = latex
+        .replace(/(?<!\\)\b([A-Za-z](?: [A-Za-z])+)\b/g, (match) =>
+          match.replace(/ /g, "")
+        )
+        .replace(/(?<!\\)\b([A-Za-z]) ([a-z]{2,})\b/g, "$1$2")
+        .replace(/([A-Za-z]) ([A-Za-z])_/g, "$1$2_")
+        .replace(/_([A-Za-z]) ([A-Za-z])/g, "_$1$2")
+        .replace(/\{([A-Za-z]) ([A-Za-z])/g, "{$1$2")
+        .replace(/([A-Za-z]) ([A-Za-z])\}/g, "$1$2}");
+    }
+    
+    // Remove spacing around subscripts and normalize whitespace
+    latex = latex.replace(/\s*_\s*/g, "_");
+    latex = latex.replace(/\{\s+/g, "{").replace(/\s+\}/g, "}");
+    latex = latex.replace(/\\times([A-Za-z])/g, "\\times $1");
+    latex = latex.replace(/_\{\}/g, "");
+    latex = latex.replace(/\s{2,}/g, " ").trim();
+    return latex;
+  } catch (err) {
+    process.stderr.write(`\n[!] Failed to convert MathML: ${err}\n`);
+    return "";
+  }
+}
+
+function extract_equations(html: string): { html: string; equations: Map<string, string> } {
+  const equations = new Map<string, string>();
+  const placeholder_prefix = "EQUATIONPLACEHOLDER";
+  let counter = 0;
+
+  // Extract equation blocks with MathML
+  const processed_html = html.replace(
+    /<div[^>]*class="[^"]*equation[^"]*"[^>]*>([\s\S]*?)<\/div>/gi,
+    (match, content) => {
+      // Extract label
+      const label_match = content.match(/<span[^>]*class="[^"]*equation-label[^"]*"[^>]*>([^<]+)<\/span>/);
+      const label = label_match ? label_match[1].trim() : "";
+      
+      // Extract MathML
+      const mathml_match = content.match(/<math[^>]*>([\s\S]*?)<\/math>/i);
+      if (mathml_match) {
+        const mathml = '<math>' + mathml_match[1] + '</math>';
+        const latex = mathml_to_latex(mathml);
+        
+        if (latex) {
+          const placeholder = `${placeholder_prefix}${counter}`;
+          const equation_md = label
+            ? `\n\n${label} $$${latex}$$\n\n`
+            : `\n\n$$${latex}$$\n\n`;
+          equations.set(placeholder, equation_md);
+          counter++;
+          return placeholder;
+        }
+      }
+      
+      // Return original if conversion failed
+      return match;
+    }
+  );
+
+  return { html: processed_html, equations };
+}
+
 function clean_html(html: string): string {
   const content_match = html.match(/<div[^>]*class="[^"]*subsection[^"]*"[^>]*>[\s\S]*$/);
   if (content_match) {
@@ -299,13 +491,23 @@ function convert_to_markdown(blocks: ContentBlock[], info: DatasheetInfo): strin
     const cleaned = clean_html(block.html);
     if (!cleaned.trim()) continue;
 
-    const { html: html_without_tables, tables } = extract_tables(cleaned);
+    // Extract equations first (before tables)
+    const { html: html_without_equations, equations } = extract_equations(cleaned);
+    
+    // Then extract tables
+    const { html: html_without_tables, tables } = extract_tables(html_without_equations);
 
     try {
       let md = td.turndown(html_without_tables);
 
+      // Replace table placeholders
       for (let i = 0; i < tables.length; i++) {
         md = md.replace(`TABLEPLACEHOLDER${i}`, tables[i]);
+      }
+      
+      // Replace equation placeholders (use function to avoid $ interpretation)
+      for (const [placeholder, equation_md] of equations.entries()) {
+        md = md.replace(placeholder, () => equation_md);
       }
 
       md = post_process_markdown(md);
@@ -333,17 +535,21 @@ Usage:
   ti-fetch <url> [options]
 
 Arguments:
-  url                 TI document viewer URL
-                      Example: https://www.ti.com/document-viewer/mcf8329a-q1/datasheet
+  url                    TI document viewer URL
+                         Example: https://www.ti.com/document-viewer/mcf8329a-q1/datasheet
 
 Options:
-  -o, --output FILE   Output file (default: stdout)
-  -c, --concurrency N Parallel requests (default: 10)
-  -h, --help          Show this help
+  -o, --output FILE      Output file (default: stdout)
+  -c, --concurrency N    Parallel requests (default: 10)
+  --download-images      Download images to assets/ directory and use relative links
+  --svg-to-webp          Convert SVG images to WebP (requires --download-images)
+  -h, --help             Show this help
 
 Examples:
   ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet
   ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet -o mcf8329a-q1.md
+  ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet -o out.md --download-images
+  ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet -o out.md --download-images --svg-to-webp
 `);
     process.exit(0);
   }
@@ -351,6 +557,8 @@ Examples:
   let url = "";
   let output = "";
   let concurrency = 10;
+  let download_imgs = false;
+  let svg_to_webp = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -358,6 +566,10 @@ Examples:
       output = args[++i];
     } else if (arg === "-c" || arg === "--concurrency") {
       concurrency = parseInt(args[++i], 10);
+    } else if (arg === "--download-images") {
+      download_imgs = true;
+    } else if (arg === "--svg-to-webp") {
+      svg_to_webp = true;
     } else if (!arg.startsWith("-")) {
       url = arg;
     }
@@ -368,6 +580,16 @@ Examples:
     process.exit(1);
   }
 
+  if (svg_to_webp && !download_imgs) {
+    process.stderr.write("Error: --svg-to-webp requires --download-images\n");
+    process.exit(1);
+  }
+
+  if (download_imgs && !output) {
+    process.stderr.write("Error: --download-images requires -o/--output\n");
+    process.exit(1);
+  }
+
   const { doc_type } = parse_url(url);
   const start = performance.now();
 
@@ -375,7 +597,11 @@ Examples:
   const blocks = await fetch_all_blocks(info, doc_type, concurrency);
 
   process.stderr.write(`[*] Converting to Markdown...\n`);
-  const markdown = convert_to_markdown(blocks, info);
+  let markdown = convert_to_markdown(blocks, info);
+
+  if (download_imgs && output) {
+    markdown = await download_images(markdown, output, svg_to_webp, concurrency);
+  }
 
   const elapsed = ((performance.now() - start) / 1000).toFixed(2);
   process.stderr.write(`[*] Done in ${elapsed}s\n`);

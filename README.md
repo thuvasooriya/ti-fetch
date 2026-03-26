@@ -10,8 +10,10 @@ TI's document viewer uses lazy-loading, rendering content in blocks as you scrol
 
 - Parallel fetching of all document sections (~3s for 150+ sections)
 - Proper Markdown formatting with headings, lists, and tables
-- SVG image URLs preserved with captions
-- Subscript/superscript support (I^2^C, V~PVDD~)
+- Equation extraction from MathML with LaTeX output by default
+- Subscript/superscript preservation using HTML tags (`<sub>`, `<sup>`)
+- Optional local image download to `assets/` with relative links
+- Optional SVG→WebP conversion for downloaded images
 - Links to TI resources maintained
 
 ## Installation
@@ -80,11 +82,13 @@ ti-fetch <url> [options]
 
 ### Options
 
-| Option                | Description       | Default |
-| --------------------- | ----------------- | ------- |
-| `-o, --output FILE`   | Output file path  | stdout  |
-| `-c, --concurrency N` | Parallel requests | 10      |
-| `-h, --help`          | Show help         |         |
+| Option                  | Description                                                   | Default |
+| ----------------------- | ------------------------------------------------------------- | ------- |
+| `-o, --output FILE`     | Output file path                                              | stdout  |
+| `-c, --concurrency N`   | Parallel requests                                             | 10      |
+| `--download-images`     | Download images to `assets/` next to output file, relink MD  | off     |
+| `--svg-to-webp`         | Convert downloaded SVGs to WebP (requires `--download-images`)| off     |
+| `-h, --help`            | Show help                                                     |         |
 
 ### Examples
 
@@ -97,6 +101,12 @@ ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet -o mcf8329a-q1
 
 # Higher concurrency for faster fetching
 ti-fetch https://www.ti.com/document-viewer/tps65988/datasheet -c 20 -o tps65988.md
+
+# Download images locally and use relative links
+ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet -o mcf8329a-q1.md --download-images
+
+# Download images and convert SVG files to WebP
+ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet -o mcf8329a-q1.md --download-images --svg-to-webp
 ```
 
 ## Output Format
@@ -106,8 +116,9 @@ The generated Markdown includes:
 - Document title and metadata
 - All sections with proper heading hierarchy
 - Tables in Markdown format
-- Images with full TI URLs
+- Images (remote URLs by default, or local `assets/` links with `--download-images`)
 - Figure captions
+- Equations converted from MathML to LaTeX (`$$...$$`) when TI provides MathML; non-MathML equations remain source text/image
 - Internal links preserved
 
 ### Example output structure
@@ -141,8 +152,10 @@ The generated Markdown includes:
 1. Fetches the main document page to extract the table of contents
 2. Parses ordered section GUIDs from TOC links
 3. Fetches all content blocks in parallel via `/{product}/datasheet/{GUID}?raw=1`
-4. Converts HTML to Markdown using Turndown with custom rules
-5. Assembles sections in document order
+4. Extracts MathML equation blocks and converts them to LaTeX
+5. Converts remaining HTML to Markdown using Turndown with custom rules
+6. Optionally downloads and relinks images locally (`assets/`, optional SVG→WebP)
+7. Assembles sections in document order
 
 ## Building
 
