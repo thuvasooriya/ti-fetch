@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
 import TurndownService from "turndown";
-import sharp from "sharp";
 import { join, dirname, extname, basename } from "node:path";
 import MathMLToLaTeX from "mathml-to-latex";
 
@@ -115,6 +114,25 @@ async function fetch_all_blocks(
   return blocks.sort((a, b) => a.order - b.order);
 }
 
+// Lazy-load sharp only when --svg-to-webp is used (native module can't be bundled)
+let _sharp: typeof import("sharp").default | null = null;
+async function get_sharp() {
+  if (!_sharp) {
+    try {
+      _sharp = (await import("sharp")).default;
+    } catch (err) {
+      const err_msg = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        "Failed to load optional dependency 'sharp' required by --svg-to-webp.\n" +
+        "Install or reinstall it with Bun: bun add sharp\n" +
+        "If this is a release bundle/binary, --svg-to-webp may require running from source with dependencies installed.\n" +
+        `Original error: ${err_msg}`
+      );
+    }
+  }
+  return _sharp;
+}
+
 async function download_image(url: string, local_path: string, convert_to_webp: boolean = false): Promise<string> {
   const response = await fetch(url);
   if (!response.ok) {
@@ -126,6 +144,7 @@ async function download_image(url: string, local_path: string, convert_to_webp: 
 
   // Convert SVG to WebP if requested
   if (convert_to_webp && ext === ".svg") {
+    const sharp = await get_sharp();
     const webp_path = local_path.replace(/\.svg$/i, ".webp");
     await Bun.write(webp_path, new Uint8Array(), { createPath: true });
     await sharp(buffer).webp({ quality: 90 }).toFile(webp_path);
@@ -590,6 +609,16 @@ Examples:
   if (download_imgs && !output) {
     process.stderr.write("Error: --download-images requires -o/--output\n");
     process.exit(1);
+  }
+
+  // Validate sharp is available early if --svg-to-webp is used
+  if (svg_to_webp) {
+    try {
+      await get_sharp();
+    } catch (err) {
+      process.stderr.write(`Error: ${(err as Error).message}\n`);
+      process.exit(1);
+    }
   }
 
   const { doc_type } = parse_url(url);

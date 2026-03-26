@@ -13,7 +13,7 @@ TI's document viewer uses lazy-loading, rendering content in blocks as you scrol
 - Equation extraction from MathML with LaTeX output by default
 - Subscript/superscript preservation using HTML tags (`<sub>`, `<sup>`)
 - Optional local image download to `assets/` with relative links
-- Optional SVG→WebP conversion for downloaded images
+- Optional SVG→WebP conversion for downloaded images (requires optional `sharp` dependency)
 - Links to TI resources maintained
 
 ## Installation
@@ -29,7 +29,7 @@ curl -L https://github.com/thuvasooriya/ti-fetch/releases/latest/download/ti-fet
 chmod +x ~/.local/bin/ti-fetch
 ```
 
-Note: The bundle requires `bun` to be in your PATH.
+Note: The bundle requires `bun` to be in your PATH. `--svg-to-webp` also requires the optional `sharp` dependency (`bun add sharp`).
 
 ### Pre-built binaries (standalone)
 
@@ -97,7 +97,7 @@ ti-fetch <url> [options]
 | `-o, --output FILE`   | Output file path                                               | stdout  |
 | `-c, --concurrency N` | Parallel requests                                              | 10      |
 | `--download-images`   | Download images to `assets/` next to output file, relink MD    | off     |
-| `--svg-to-webp`       | Convert downloaded SVGs to WebP (requires `--download-images`) | off     |
+| `--svg-to-webp`       | Convert downloaded SVGs to WebP (requires `--download-images` and optional `sharp`) | off     |
 | `-h, --help`          | Show help                                                      |         |
 
 ### Examples
