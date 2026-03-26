@@ -368,8 +368,7 @@ function mathml_to_latex(mathml: string): string {
     latex = latex.replace(/\\textrm\{\s*\}/g, " ");
     latex = latex.replace(/\\left\(\s*\\right\.\s*/g, "(");
     latex = latex.replace(/\s*\\left\.\s*\\right\)/g, ")");
-    latex = latex.replace(/\\underline\s*/g, "_");
-    latex = latex.replace(/\\_/g, "_");
+    latex = latex.replace(/\\underline\s*/g, "\\_");
     
     // Join split identifiers emitted as letter-by-letter tokens
     let previous = "";
@@ -386,8 +385,10 @@ function mathml_to_latex(mathml: string): string {
         .replace(/([A-Za-z]) ([A-Za-z])\}/g, "$1$2}");
     }
     
-    // Remove spacing around subscripts and normalize whitespace
+    // Remove spacing around subscripts and escaped underscores
     latex = latex.replace(/\s*_\s*/g, "_");
+    latex = latex.replace(/([A-Za-z]) \\_/g, "$1\\_");
+    latex = latex.replace(/\\_ ([A-Za-z])/g, "\\_$1");
     latex = latex.replace(/\{\s+/g, "{").replace(/\s+\}/g, "}");
     latex = latex.replace(/\\times([A-Za-z])/g, "\\times $1");
     latex = latex.replace(/_\{\}/g, "");
@@ -504,13 +505,14 @@ function convert_to_markdown(blocks: ContentBlock[], info: DatasheetInfo): strin
       for (let i = 0; i < tables.length; i++) {
         md = md.replace(`TABLEPLACEHOLDER${i}`, tables[i]);
       }
-      
+
+      md = post_process_markdown(md);
+
       // Replace equation placeholders (use function to avoid $ interpretation)
       for (const [placeholder, equation_md] of equations.entries()) {
         md = md.replace(placeholder, () => equation_md);
       }
 
-      md = post_process_markdown(md);
 
       if (md.trim()) {
         sections.push(md);
