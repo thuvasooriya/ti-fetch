@@ -20,7 +20,7 @@ TI's document viewer uses lazy-loading, rendering content in blocks as you scrol
 
 The following commands assume you have `$HOME/.local/bin` in your PATH.
 
-### Bundle (~250KB, requires Bun)
+### Bundle (requires Bun)
 
 If you have [Bun](https://bun.sh) installed, use the lightweight bundle:
 
@@ -31,7 +31,7 @@ chmod +x ~/.local/bin/ti-fetch
 
 Note: The bundle requires `bun` to be in your PATH.
 
-### Pre-built binaries (~60MB, standalone)
+### Pre-built binaries (standalone)
 
 Download from [Releases](https://github.com/user/ti-fetch/releases):
 
@@ -82,13 +82,13 @@ ti-fetch <url> [options]
 
 ### Options
 
-| Option                  | Description                                                   | Default |
-| ----------------------- | ------------------------------------------------------------- | ------- |
-| `-o, --output FILE`     | Output file path                                              | stdout  |
-| `-c, --concurrency N`   | Parallel requests                                             | 10      |
-| `--download-images`     | Download images to `assets/` next to output file, relink MD  | off     |
-| `--svg-to-webp`         | Convert downloaded SVGs to WebP (requires `--download-images`)| off     |
-| `-h, --help`            | Show help                                                     |         |
+| Option                | Description                                                    | Default |
+| --------------------- | -------------------------------------------------------------- | ------- |
+| `-o, --output FILE`   | Output file path                                               | stdout  |
+| `-c, --concurrency N` | Parallel requests                                              | 10      |
+| `--download-images`   | Download images to `assets/` next to output file, relink MD    | off     |
+| `--svg-to-webp`       | Convert downloaded SVGs to WebP (requires `--download-images`) | off     |
+| `-h, --help`          | Show help                                                      |         |
 
 ### Examples
 
@@ -189,23 +189,6 @@ bun run build:darwin-arm64
 The standalone binary embeds the full Bun runtime (~58MB base). The `--minify` flag reduces the JS bundle size. The `--bytecode` flag pre-compiles to bytecode for faster startup.
 
 For minimal distribution size when users have Bun installed, use the bundle mode.
-
-## Release
-
-To create a new release:
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-The GitHub Action builds binaries for all platforms and creates a release with:
-
-- `ti-fetch-darwin-arm64.tar.gz` (macOS Apple Silicon)
-- `ti-fetch-darwin-x64.tar.gz` (macOS Intel)
-- `ti-fetch-linux-arm64.tar.gz` (Linux ARM64)
-- `ti-fetch-linux-x64.tar.gz` (Linux x64)
-- `ti-fetch` (lightweight bundle, requires Bun)
 
 ## License
 
