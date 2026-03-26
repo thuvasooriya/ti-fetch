@@ -25,7 +25,7 @@ The following commands assume you have `$HOME/.local/bin` in your PATH.
 If you have [Bun](https://bun.sh) installed, use the lightweight bundle:
 
 ```bash
-curl -L https://github.com/user/ti-fetch/releases/latest/download/ti-fetch -o ~/.local/bin/ti-fetch
+curl -L https://github.com/thuvasooriya/ti-fetch/releases/latest/download/ti-fetch -o ~/.local/bin/ti-fetch
 chmod +x ~/.local/bin/ti-fetch
 ```
 
@@ -33,30 +33,40 @@ Note: The bundle requires `bun` to be in your PATH.
 
 ### Pre-built binaries (standalone)
 
-Download from [Releases](https://github.com/user/ti-fetch/releases):
+Download from [Releases](https://github.com/thuvasooriya/ti-fetch/releases):
+
+#### macOS ARM64 (Apple Silicon)
 
 ```bash
-# macOS ARM64 (Apple Silicon)
-curl -L https://github.com/user/ti-fetch/releases/latest/download/ti-fetch-darwin-arm64.tar.gz | tar xz
+curl -L https://github.com/thuvasooriya/ti-fetch/releases/latest/download/ti-fetch-darwin-arm64.tar.gz | tar xz
 mv ti-fetch-darwin-arm64 ~/.local/bin/ti-fetch
+```
 
-# macOS x64 (Intel)
-curl -L https://github.com/user/ti-fetch/releases/latest/download/ti-fetch-darwin-x64.tar.gz | tar xz
+#### macOS x64 (Intel)
+
+```bash
+curl -L https://github.com/thuvasooriya/ti-fetch/releases/latest/download/ti-fetch-darwin-x64.tar.gz | tar xz
 mv ti-fetch-darwin-x64 ~/.local/bin/ti-fetch
+```
 
-# Linux ARM64
-curl -L https://github.com/user/ti-fetch/releases/latest/download/ti-fetch-linux-arm64.tar.gz | tar xz
+#### Linux ARM64
+
+```bash
+curl -L https://github.com/thuvasooriya/ti-fetch/releases/latest/download/ti-fetch-linux-arm64.tar.gz | tar xz
 mv ti-fetch-linux-arm64 ~/.local/bin/ti-fetch
+```
 
-# Linux x64
-curl -L https://github.com/user/ti-fetch/releases/latest/download/ti-fetch-linux-x64.tar.gz | tar xz
+#### Linux x64
+
+```bash
+curl -L https://github.com/thuvasooriya/ti-fetch/releases/latest/download/ti-fetch-linux-x64.tar.gz | tar xz
 mv ti-fetch-linux-x64 ~/.local/bin/ti-fetch
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/user/ti-fetch.git
+git clone https://github.com/thuvasooriya/ti-fetch.git
 cd ti-fetch
 bun install
 
