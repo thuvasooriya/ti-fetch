@@ -393,46 +393,105 @@ function extract_cell_text(cell_html: string): string {
 }
 
 function convert_table_html(table_html: string): string {
-  const rows: string[][] = [];
-  let max_cols = 0;
+  // Count header rows in <thead>
+  const thead_match = table_html.match(/<thead[^>]*>([\s\S]*?)<\/thead>/i);
+  const thead_html = thead_match ? thead_match[1] : "";
+  const thead_rows = (thead_html.match(/<tr[^>]*>/gi) || []).length;
+
+  // Build a proper grid handling both colspan and rowspan
+  const grid: (string | null)[][] = [];
+  const rowspan_cells: Map<string, { text: string; remaining: number }> = new Map();
 
   const row_regex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let row_idx = 0;
   let row_match;
+
   while ((row_match = row_regex.exec(table_html)) !== null) {
     const row_html = row_match[1];
-    const cells: string[] = [];
+    grid[row_idx] = [];
+    let col_idx = 0;
 
-    const cell_regex = /<(th|td)[^>]*>([\s\S]*?)<\/\1>/gi;
+    const cell_regex = /<(th|td)([^>]*)>([\s\S]*?)<\/\1>/gi;
     let cell_match;
+
     while ((cell_match = cell_regex.exec(row_html)) !== null) {
-      const text = extract_cell_text(cell_match[2]);
-      cells.push(text);
+      const attrs = cell_match[2];
+      const content = cell_match[3];
+      const text = extract_cell_text(content);
+
+      const colspan_match = attrs.match(/colspan\s*=\s*["']?(\d+)["']?/i);
+      const rowspan_match = attrs.match(/rowspan\s*=\s*["']?(\d+)["']?/i);
+      const colspan = colspan_match ? parseInt(colspan_match[1], 10) : 1;
+      const rowspan = rowspan_match ? parseInt(rowspan_match[1], 10) : 1;
+
+      while (grid[row_idx][col_idx] !== undefined) col_idx++;
+
+      for (let c = 0; c < colspan; c++) {
+        const target_col = col_idx + c;
+        grid[row_idx][target_col] = text;
+
+        if (rowspan > 1) {
+          for (let r = 1; r < rowspan; r++) {
+            const key = `${row_idx + r},${target_col}`;
+            rowspan_cells.set(key, { text, remaining: rowspan - r });
+          }
+        }
+      }
+      col_idx += colspan;
     }
 
-    if (cells.length > 0) {
-      rows.push(cells);
-      max_cols = Math.max(max_cols, cells.length);
+    row_idx++;
+  }
+
+  // Fill in rowspan cells
+  for (const [key, info] of rowspan_cells.entries()) {
+    const [r, c] = key.split(",").map(Number);
+    if (!grid[r]) grid[r] = [];
+    if (grid[r][c] === undefined) {
+      grid[r][c] = info.text;
     }
   }
 
-  if (rows.length === 0 || max_cols === 0) return "";
+  if (grid.length === 0) return "";
 
-  const has_content = rows.some((row) => row.some((cell) => cell.length > 0));
-  if (!has_content) return "";
+  const max_cols = Math.max(...grid.map((r) => r?.length || 0));
+  if (max_cols === 0) return "";
 
-  for (const row of rows) {
+  for (const row of grid) {
+    for (let c = 0; c < max_cols; c++) {
+      if (row[c] === undefined || row[c] === null) {
+        row[c] = "";
+      }
+    }
     while (row.length < max_cols) {
       row.push("");
     }
   }
 
+  const has_content = grid.some((row) => row.some((cell) => (cell ?? "").length > 0));
+  if (!has_content) return "";
+
+  // Use thead row count for header detection (default to 1)
+  const header_row_count = Math.max(1, thead_rows);
+
+  // Merge header rows: later rows override earlier (more specific sub-headers)
+  const header: string[] = [...grid[0].map((c) => c ?? "")];
+  for (let h = 1; h < header_row_count && h < grid.length; h++) {
+    for (let c = 0; c < max_cols; c++) {
+      const current = header[c];
+      const candidate = grid[h][c] ?? "";
+      if (candidate && candidate !== current) {
+        header[c] = candidate;
+      }
+    }
+  }
+
   const lines: string[] = [];
-  const header = rows[0];
   lines.push("| " + header.join(" | ") + " |");
   lines.push("| " + header.map(() => "---").join(" | ") + " |");
 
-  for (let i = 1; i < rows.length; i++) {
-    lines.push("| " + rows[i].join(" | ") + " |");
+  for (let i = header_row_count; i < grid.length; i++) {
+    lines.push("| " + (grid[i].map((c) => c ?? "")).join(" | ") + " |");
   }
 
   return "\n\n" + lines.join("\n") + "\n\n";
