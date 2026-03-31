@@ -3,6 +3,19 @@ import TurndownService from "turndown";
 import { join, dirname, extname, basename } from "node:path";
 import { createRequire } from "node:module";
 import MathMLToLaTeX from "mathml-to-latex";
+import package_json from "./package.json" with { type: "json" };
+import {
+  prompt_text,
+  render_help,
+  run_with_spinner,
+  terminal_style,
+  type HelpDocument,
+} from "./lib/cli";
+import {
+  parse_self_update_cli_options,
+  run_github_self_update,
+  type ReleaseAssetSpec,
+} from "./lib/self_update";
 
 const BASE_URL = "https://www.ti.com";
 
@@ -25,6 +38,8 @@ interface ImageInfo {
   relative_path: string;
 }
 
+type ImageDownloadMode = "off" | "auto" | "webp" | "png";
+
 
 function parse_url(url: string): { product: string; doc_type: string } {
   const match = url.match(/document-viewer\/([^/]+)\/(\w+)/i);
@@ -34,11 +49,17 @@ function parse_url(url: string): { product: string; doc_type: string } {
   return { product: match[1].toUpperCase(), doc_type: match[2] };
 }
 
-async function extract_toc(url: string): Promise<DatasheetInfo> {
+async function extract_toc(
+  url: string,
+  options?: { log_progress?: boolean }
+): Promise<DatasheetInfo> {
+  const log_progress = options?.log_progress ?? true;
   const { product, doc_type } = parse_url(url);
   const normalized_url = `${BASE_URL}/document-viewer/${product}/${doc_type}`;
 
-  process.stderr.write(`[*] Fetching TOC from ${normalized_url}\n`);
+  if (log_progress) {
+    process.stderr.write(`[*] Fetching TOC from ${normalized_url}\n`);
+  }
   const response = await fetch(normalized_url);
   if (!response.ok) {
     throw new Error(`Failed to fetch TOC: ${response.status}`);
@@ -68,7 +89,9 @@ async function extract_toc(url: string): Promise<DatasheetInfo> {
     }
   }
 
-  process.stderr.write(`[*] Found ${guids.length} sections\n`);
+  if (log_progress) {
+    process.stderr.write(`[*] Found ${guids.length} sections\n`);
+  }
   return { product, doc_id, title, guids };
 }
 
@@ -115,7 +138,7 @@ async function fetch_all_blocks(
   return blocks.sort((a, b) => a.order - b.order);
 }
 
-// Lazy-load sharp only when --svg-to-webp is used.
+// Lazy-load sharp only when image mode requires SVG conversion (--download-images=webp|png).
 // For bundle/compiled artifacts, install sharp at runtime in a tool cache when unavailable.
 const SHARP_VERSION = "0.34.5";
 const SHARP_RUNTIME_DIR = (() => {
@@ -201,7 +224,7 @@ async function load_sharp(): Promise<typeof import("sharp").default> {
   } catch (runtime_err) {
     const runtime_msg = runtime_err instanceof Error ? runtime_err.message : String(runtime_err);
     throw new Error(
-      "Failed to load optional dependency 'sharp' required by --svg-to-webp.\n" +
+      "Failed to load optional dependency 'sharp' required by --download-images=webp|png.\n" +
       "ti-fetch bundle runs with Bun (not Node). npm/node lines in nested errors are emitted by sharp itself.\n" +
       "Tried loading local sharp and runtime-installing sharp with Bun.\n" +
       `Direct load error: ${direct_msg}\n` +
@@ -223,25 +246,28 @@ async function get_sharp(): Promise<typeof import("sharp").default> {
   }
 }
 
-async function download_image(url: string, local_path: string, convert_to_webp: boolean = false): Promise<string> {
+async function download_image(url: string, local_path: string, image_mode: ImageDownloadMode): Promise<string> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Failed to download image: ${url}`);
   }
 
   const buffer = Buffer.from(await response.arrayBuffer());
-  const ext = extname(url).toLowerCase();
+  const source_url = url.split("?")[0] ?? url;
+  const ext = extname(source_url).toLowerCase();
 
-  // Convert SVG to WebP if requested
-  if (convert_to_webp && ext === ".svg") {
+  if (ext === ".svg" && (image_mode === "webp" || image_mode === "png")) {
     const sharp = await get_sharp();
-    const webp_path = local_path.replace(/\.svg$/i, ".webp");
-    await Bun.write(webp_path, new Uint8Array(), { createPath: true });
-    await sharp(buffer).webp({ quality: 90 }).toFile(webp_path);
-    return webp_path;
+    const converted_path = local_path.replace(/\.svg$/i, image_mode === "webp" ? ".webp" : ".png");
+    await Bun.write(converted_path, new Uint8Array(), { createPath: true });
+    if (image_mode === "webp") {
+      await sharp(buffer).webp({ quality: 90 }).toFile(converted_path);
+    } else {
+      await sharp(buffer).png().toFile(converted_path);
+    }
+    return converted_path;
   }
 
-  // Otherwise save as-is
   await Bun.write(local_path, buffer, { createPath: true });
   return local_path;
 }
@@ -249,12 +275,11 @@ async function download_image(url: string, local_path: string, convert_to_webp: 
 async function download_images(
   markdown: string,
   output_path: string,
-  convert_svg: boolean,
+  image_mode: ImageDownloadMode,
   concurrency: number
- ): Promise<string> {
+): Promise<string> {
   const output_dir = dirname(output_path);
   const assets_dir = join(output_dir, "assets");
-
 
   // Extract all image URLs
   const image_pattern = /!\[([^\]]*)\]\(([^)]+)\)/g;
@@ -265,7 +290,8 @@ async function download_images(
     const url = match[2];
     if (!url.startsWith("http")) continue; // Skip already-local images
 
-    const filename = basename(url).replace(/\?.*$/, ""); // Remove query params
+    const source_url = url.split("?")[0] ?? url;
+    const filename = basename(source_url) || `image-${images.length + 1}`;
     const local_path = join(assets_dir, filename);
     const relative_path = `assets/${filename}`;
 
@@ -278,7 +304,6 @@ async function download_images(
 
   process.stderr.write(`[*] Downloading ${images.length} images...\n`);
 
-  // Download images with concurrency
   const download_queue = [...images];
   const results = new Map<string, string>(); // url -> relative_path
   let completed = 0;
@@ -290,7 +315,7 @@ async function download_images(
       if (!img) break;
 
       try {
-        const actual_path = await download_image(img.url, img.local_path, convert_svg);
+        const actual_path = await download_image(img.url, img.local_path, image_mode);
         const actual_filename = basename(actual_path);
         const actual_relative = `assets/${actual_filename}`;
         results.set(img.url, actual_relative);
@@ -306,7 +331,6 @@ async function download_images(
   await Promise.all(workers);
   process.stderr.write(`\n`);
 
-  // Replace URLs in markdown
   let updated = markdown;
   for (const [url, relative_path] of results.entries()) {
     updated = updated.replace(new RegExp(`\\]\\(${url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`, "g"), `](${relative_path})`);
@@ -331,7 +355,7 @@ function create_turndown(): TurndownService {
       const title = (el.getAttribute("title") || "").replace(/\s+/g, " ").trim();
       const full_src = src.startsWith("/") ? `${BASE_URL}${src}` : src;
       const caption = title || alt;
-      // Always use full URL initially - will be replaced later if download_images is true
+      // Always use full URL initially; rewritten to local assets when image downloads are enabled
       return caption ? `![${caption}](${full_src})` : `![](${full_src})`;
     },
   });
@@ -694,103 +718,559 @@ function convert_to_markdown(blocks: ContentBlock[], info: DatasheetInfo): strin
   return sections.join("\n").replace(/\n{4,}/g, "\n\n\n");
 }
 
-async function main() {
-  const args = process.argv.slice(2);
+const DEFAULT_CONCURRENCY = 10;
+const DOWNLOAD_IMAGE_FLAG_VALUES = ["auto", "webp", "png"] as const;
+const INTERACTIVE_IMAGE_MODES = ["off", ...DOWNLOAD_IMAGE_FLAG_VALUES] as const;
+const DOWNLOAD_IMAGE_FLAG_VALUES_SET = new Set<string>(DOWNLOAD_IMAGE_FLAG_VALUES);
+const INTERACTIVE_IMAGE_MODES_SET = new Set<string>(INTERACTIVE_IMAGE_MODES);
 
-  if (args.length === 0 || args.includes("-h") || args.includes("--help")) {
-    console.log(`
-ti-fetch - Extract TI datasheets to Markdown
+const package_meta = package_json as {
+  name: string;
+  description: string;
+  version: string;
+  repository?: string | { url?: string };
+};
+const CLI_NAME = package_meta.name;
+const CLI_DESCRIPTION = package_meta.description;
+const CLI_VERSION = package_meta.version;
+const CLI_REPOSITORY = package_meta.repository;
+const DEFAULT_RELEASE_REPOSITORY = "thuvasooriya/ti-fetch";
 
-Usage:
-  ti-fetch <url> [options]
+type InputKind = "url" | "file";
 
-Arguments:
-  url                    TI document viewer URL
-                         Example: https://www.ti.com/document-viewer/mcf8329a-q1/datasheet
+interface ParsedCliConfig {
+  input: string;
+  output: string;
+  concurrency: number;
+  image_mode: ImageDownloadMode;
+}
 
-Options:
-  -o, --output FILE      Output file (default: stdout)
-  -c, --concurrency N    Parallel requests (default: 10)
-  --download-images      Download images to assets/ directory and use relative links
-  --svg-to-webp          Convert SVG images to WebP (requires --download-images)
-  -h, --help             Show this help
+interface RunConfig {
+  url: string;
+  output: string;
+  concurrency: number;
+  image_mode: ImageDownloadMode;
+}
 
-Examples:
-  ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet
-  ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet -o mcf8329a-q1.md
-  ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet -o out.md --download-images
-  ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet -o out.md --download-images --svg-to-webp
-`);
-    process.exit(0);
+interface ResolvedRunConfig {
+  targets: RunConfig[];
+  preloaded_info?: DatasheetInfo;
+}
+
+interface ResolvedInput {
+  kind: InputKind;
+  urls: string[];
+}
+
+function parse_download_images_flag_value(value: string): ImageDownloadMode {
+  const normalized = value.trim().toLowerCase();
+  if (DOWNLOAD_IMAGE_FLAG_VALUES_SET.has(normalized)) {
+    return normalized as ImageDownloadMode;
+  }
+  throw new Error(`Invalid --download-images value: ${value}. Allowed values: auto, webp, png`);
+}
+
+function parse_interactive_image_mode(value: string): ImageDownloadMode {
+  const normalized = value.trim().toLowerCase();
+  if (INTERACTIVE_IMAGE_MODES_SET.has(normalized)) {
+    return normalized as ImageDownloadMode;
+  }
+  throw new Error(`Image mode must be one of: off, auto, webp, png`);
+}
+
+const RELEASE_PLATFORM_ASSETS: Record<string, ReleaseAssetSpec> = {
+  "darwin-arm64": {
+    asset_name: "ti-fetch-darwin-arm64.tar.gz",
+    archive_type: "tar.gz",
+    extracted_binary_name: "ti-fetch-darwin-arm64",
+  },
+  "darwin-x64": {
+    asset_name: "ti-fetch-darwin-x64.tar.gz",
+    archive_type: "tar.gz",
+    extracted_binary_name: "ti-fetch-darwin-x64",
+  },
+  "linux-arm64": {
+    asset_name: "ti-fetch-linux-arm64.tar.gz",
+    archive_type: "tar.gz",
+    extracted_binary_name: "ti-fetch-linux-arm64",
+  },
+  "linux-x64": {
+    asset_name: "ti-fetch-linux-x64.tar.gz",
+    archive_type: "tar.gz",
+    extracted_binary_name: "ti-fetch-linux-x64",
+  },
+  "win32-arm64": {
+    asset_name: "ti-fetch-windows-arm64.zip",
+    archive_type: "zip",
+    extracted_binary_name: "ti-fetch-windows-arm64.exe",
+  },
+  "win32-x64": {
+    asset_name: "ti-fetch-windows-x64.zip",
+    archive_type: "zip",
+    extracted_binary_name: "ti-fetch-windows-x64.exe",
+  },
+};
+const RELEASE_BUNDLE_ASSET: ReleaseAssetSpec = {
+  asset_name: "ti-fetch",
+  archive_type: "raw",
+};
+
+function print_self_update_help(): void {
+  const help_document: HelpDocument = {
+    name: `${CLI_NAME} self-update`,
+    description: "Update installed release build from latest GitHub release",
+    version: CLI_VERSION,
+    usage: ["ti-fetch self-update [--check]"],
+    sections: [
+      {
+        title: "Options",
+        rows: [
+          { left: "--check", right: "Check for updates without installing" },
+          { left: "-h, --help", right: "Show command help" },
+        ],
+      },
+    ],
+    examples: ["ti-fetch self-update --check", "ti-fetch self-update"],
+  };
+  console.log(render_help(help_document));
+}
+
+async function run_self_update(check_only: boolean): Promise<void> {
+  const result = await run_github_self_update(
+    {
+      app_name: CLI_NAME,
+      current_version: CLI_VERSION,
+      repository: CLI_REPOSITORY,
+      repository_override: Bun.env.TI_FETCH_RELEASE_REPO?.trim(),
+      api_base_url: Bun.env.TI_FETCH_RELEASE_API_BASE?.trim(),
+      checksum_asset_name: Bun.env.TI_FETCH_RELEASE_CHECKSUM_ASSET?.trim(),
+      default_repository: DEFAULT_RELEASE_REPOSITORY,
+      platform_assets: RELEASE_PLATFORM_ASSETS,
+      bundle_asset: RELEASE_BUNDLE_ASSET,
+    },
+    {
+      check_only,
+      spinner: run_with_spinner,
+    }
+  );
+
+  if (result.status === "up_to_date") {
+    if (Bun.semver.order(result.current_version, result.latest_version) > 0) {
+      process.stderr.write(`[*] Installed version v${result.current_version} is newer than release v${result.latest_version}\n`);
+    } else {
+      process.stderr.write(`[*] ${CLI_NAME} is already up to date (v${result.current_version})\n`);
+    }
+    return;
   }
 
-  let url = "";
+  if (result.status === "update_available") {
+    process.stderr.write(`[*] Update available: v${result.current_version} -> v${result.latest_version}\n`);
+    process.stderr.write(`[*] Run '${CLI_NAME} self-update' to install the update\n`);
+    return;
+  }
+
+  process.stderr.write(`${terminal_style.success("✔")} Updated ${CLI_NAME} to v${result.latest_version}\n`);
+  if (result.checksum_verified) {
+    process.stderr.write(`[*] Release checksum verified\n`);
+  }
+  if (result.release_url) {
+    process.stderr.write(`[*] Release notes: ${result.release_url}\n`);
+  }
+}
+
+async function handle_self_update_command(args: string[]): Promise<boolean> {
+  if (args[0] !== "self-update") {
+    return false;
+  }
+
+  const options = parse_self_update_cli_options(args.slice(1));
+  if (options.show_help) {
+    print_self_update_help();
+    return true;
+  }
+
+  await run_self_update(options.check_only);
+  return true;
+}
+
+function build_help_document(): HelpDocument {
+  return {
+    name: CLI_NAME,
+    description: CLI_DESCRIPTION,
+    version: CLI_VERSION,
+    usage: ["ti-fetch <url-or-file> [options]", "ti-fetch self-update [--check]"],
+    sections: [
+      {
+        title: "Arguments",
+        rows: [
+          { left: "url-or-file", right: "TI document viewer URL or path to file with URLs (one per line)" },
+          { left: "", right: "Example URL: https://www.ti.com/document-viewer/mcf8329a-q1/datasheet" },
+          { left: "", right: "Example file: tmp/urls.md" },
+        ],
+      },
+      {
+        title: "Options",
+        rows: [
+          {
+            left: "-o, --output PATH",
+            right: "Output file for single URL input; output directory for URL-file input",
+          },
+          { left: "-c, --concurrency N", right: `Parallel requests (default: ${DEFAULT_CONCURRENCY})` },
+          {
+            left: "--download-images[=MODE]",
+            right: "Download images to assets/ and relink markdown (MODE: auto|webp|png; default when flag is auto)",
+          },
+          { left: "-v, --version", right: "Show version" },
+          { left: "-h, --help", right: "Show this help" },
+        ],
+      },
+      {
+        title: "Commands",
+        rows: [
+          { left: "self-update", right: "Update installed release build from latest GitHub release" },
+          { left: "self-update --check", right: "Check for updates without installing" },
+        ],
+      },
+    ],
+    examples: [
+      "ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet",
+      "ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet -o mcf8329a-q1.md",
+      "ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet -o out.md --download-images",
+      "ti-fetch https://www.ti.com/document-viewer/mcf8329a-q1/datasheet -o out.md --download-images=webp",
+      "ti-fetch tmp/urls.md",
+      "ti-fetch tmp/urls.md -o out --download-images=png",
+      "ti-fetch self-update --check",
+      "ti-fetch self-update",
+    ],
+  };
+}
+
+function print_help(): void {
+  console.log(render_help(build_help_document()));
+}
+
+function print_version(): void {
+  console.log(`${CLI_NAME} v${CLI_VERSION}`);
+}
+
+function is_interactive_tty(): boolean {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
+
+function infer_default_output_path(url: string): string {
+  const { product, doc_type } = parse_url(url);
+  return `${product.toLowerCase()}-${doc_type}.md`;
+}
+
+function parse_positive_integer(value: string, flag_name: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${flag_name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function validate_run_config(config: RunConfig): void {
+  parse_url(config.url);
+
+  if (config.image_mode !== "off" && !config.output) {
+    throw new Error("--download-images requires -o/--output when input is a single URL");
+  }
+
+  if (!Number.isInteger(config.concurrency) || config.concurrency <= 0) {
+    throw new Error("--concurrency must be a positive integer");
+  }
+}
+
+function parse_cli_args(args: string[]): ParsedCliConfig {
+  let input = "";
   let output = "";
-  let concurrency = 10;
-  let download_imgs = false;
-  let svg_to_webp = false;
+  let concurrency = DEFAULT_CONCURRENCY;
+  let image_mode: ImageDownloadMode = "off";
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (!arg) continue;
+
     if (arg === "-o" || arg === "--output") {
-      output = args[++i];
-    } else if (arg === "-c" || arg === "--concurrency") {
-      concurrency = parseInt(args[++i], 10);
-    } else if (arg === "--download-images") {
-      download_imgs = true;
-    } else if (arg === "--svg-to-webp") {
-      svg_to_webp = true;
-    } else if (!arg.startsWith("-")) {
-      url = arg;
+      const value = args[i + 1];
+      if (!value) {
+        throw new Error(`${arg} requires a path`);
+      }
+      output = value;
+      i++;
+      continue;
     }
+
+    if (arg === "-c" || arg === "--concurrency") {
+      const value = args[i + 1];
+      if (!value) {
+        throw new Error(`${arg} requires a value`);
+      }
+      concurrency = parse_positive_integer(value, "--concurrency");
+      i++;
+      continue;
+    }
+
+    if (arg === "--download-images") {
+      const maybe_mode = args[i + 1];
+      if (maybe_mode && !maybe_mode.startsWith("-") && DOWNLOAD_IMAGE_FLAG_VALUES_SET.has(maybe_mode.trim().toLowerCase())) {
+        image_mode = parse_download_images_flag_value(maybe_mode);
+        i++;
+      } else if (maybe_mode && !maybe_mode.startsWith("-") && input) {
+        throw new Error(`Invalid --download-images value: ${maybe_mode}. Allowed values: auto, webp, png`);
+      } else {
+        image_mode = "auto";
+      }
+      continue;
+    }
+
+    if (arg.startsWith("--download-images=")) {
+      const value = arg.slice("--download-images=".length);
+      if (!value) {
+        throw new Error("--download-images requires a value when using --download-images=<mode>");
+      }
+      image_mode = parse_download_images_flag_value(value);
+      continue;
+    }
+
+
+    if (arg.startsWith("-")) {
+      throw new Error(`Unknown option: ${arg}`);
+    }
+
+    if (input) {
+      throw new Error("Only one input argument is supported");
+    }
+    input = arg;
   }
 
-  if (!url) {
-    process.stderr.write("Error: URL required\n");
-    process.exit(1);
+  if (!input) {
+    throw new Error("Input required (TI document URL or URL-list file path)");
   }
 
-  if (svg_to_webp && !download_imgs) {
-    process.stderr.write("Error: --svg-to-webp requires --download-images\n");
-    process.exit(1);
+  return {
+    input,
+    output,
+    concurrency,
+    image_mode,
+  };
+}
+
+async function resolve_input(args: ParsedCliConfig): Promise<ResolvedInput> {
+  try {
+    parse_url(args.input);
+    return { kind: "url", urls: [args.input] };
+  } catch {
+    // Not a TI URL; treat as URL-list file path.
   }
 
-  if (download_imgs && !output) {
-    process.stderr.write("Error: --download-images requires -o/--output\n");
-    process.exit(1);
+  const input_file = Bun.file(args.input);
+  if (!(await input_file.exists())) {
+    throw new Error(`Input must be a TI document URL or a readable file containing URLs: ${args.input}`);
   }
 
-  // Validate sharp is available early if --svg-to-webp is used
-  if (svg_to_webp) {
+  const content = await input_file.text();
+  const urls: string[] = [];
+  const lines = content.split(/\r?\n/);
+
+  for (let line_index = 0; line_index < lines.length; line_index++) {
+    const raw = lines[line_index] ?? "";
+    const value = raw.trim();
+    if (!value) continue;
+
     try {
-      await get_sharp();
-    } catch (err) {
-      process.stderr.write(`Error: ${(err as Error).message}\n`);
-      process.exit(1);
+      parse_url(value);
+      urls.push(value);
+    } catch {
+      throw new Error(`Invalid URL in ${args.input} at line ${line_index + 1}: ${value}`);
     }
   }
 
-  const { doc_type } = parse_url(url);
+  if (urls.length === 0) {
+    throw new Error(`No valid URLs found in ${args.input}`);
+  }
+
+  return { kind: "file", urls };
+}
+
+function resolve_targets(parsed_args: ParsedCliConfig, input: ResolvedInput): RunConfig[] {
+  if (input.kind === "url") {
+    const target: RunConfig = {
+      url: input.urls[0],
+      output: parsed_args.output,
+      concurrency: parsed_args.concurrency,
+      image_mode: parsed_args.image_mode,
+    };
+    validate_run_config(target);
+    return [target];
+  }
+
+  const outputs = new Set<string>();
+  const targets = input.urls.map((url) => {
+    const filename = infer_default_output_path(url);
+    const output = parsed_args.output ? join(parsed_args.output, filename) : filename;
+
+    if (outputs.has(output)) {
+      throw new Error(`Resolved duplicate output path for URL list input: ${output}`);
+    }
+    outputs.add(output);
+
+    const target: RunConfig = {
+      url,
+      output,
+      concurrency: parsed_args.concurrency,
+      image_mode: parsed_args.image_mode,
+    };
+    validate_run_config(target);
+    return target;
+  });
+
+  return targets;
+}
+
+async function resolve_interactive_config(): Promise<ResolvedRunConfig> {
+  console.log(`${terminal_style.bold(CLI_NAME)} ${terminal_style.dim(`v${CLI_VERSION}`)}`);
+  console.log(CLI_DESCRIPTION);
+  console.log("");
+
+  let validated_url = "";
+  let info: DatasheetInfo | null = null;
+
+  while (!info) {
+    const candidate_url = await prompt_text({
+      label: "TI document URL",
+      validate: (value) => {
+        try {
+          parse_url(value);
+          return null;
+        } catch (error) {
+          return (error as Error).message;
+        }
+      },
+    });
+
+    try {
+      info = await run_with_spinner("Validating URL and fetching metadata", async () => {
+        return extract_toc(candidate_url, { log_progress: false });
+      });
+      validated_url = candidate_url;
+    } catch (error) {
+      process.stderr.write(`${terminal_style.error("Error:")} ${(error as Error).message}\n`);
+    }
+  }
+
+  const output = await prompt_text({
+    label: "Output file",
+    default_value: infer_default_output_path(validated_url),
+  });
+
+  const image_mode_value = await prompt_text({
+    label: "Image mode (off/auto/webp/png)",
+    default_value: "off",
+    validate: (value) => {
+      try {
+        parse_interactive_image_mode(value);
+        return null;
+      } catch (error) {
+        return (error as Error).message;
+      }
+    },
+  });
+  const image_mode = parse_interactive_image_mode(image_mode_value);
+
+  const concurrency_value = await prompt_text({
+    label: "Concurrency",
+    default_value: String(DEFAULT_CONCURRENCY),
+    validate: (value) => {
+      try {
+        parse_positive_integer(value, "--concurrency");
+        return null;
+      } catch (error) {
+        return (error as Error).message;
+      }
+    },
+  });
+  const concurrency = parse_positive_integer(concurrency_value, "--concurrency");
+
+  const target: RunConfig = {
+    url: validated_url,
+    output,
+    concurrency,
+    image_mode,
+  };
+
+  validate_run_config(target);
+  return { targets: [target], preloaded_info: info };
+}
+
+async function resolve_run_config(args: string[]): Promise<ResolvedRunConfig | null> {
+  if (args.includes("-v") || args.includes("--version")) {
+    print_version();
+    return null;
+  }
+
+  if (args.includes("-h") || args.includes("--help")) {
+    print_help();
+    return null;
+  }
+
+  if (args.length === 0) {
+    if (!is_interactive_tty()) {
+      print_help();
+      return null;
+    }
+    return resolve_interactive_config();
+  }
+
+  const parsed_args = parse_cli_args(args);
+  const input = await resolve_input(parsed_args);
+  const targets = resolve_targets(parsed_args, input);
+  return { targets };
+}
+
+async function execute_pipeline(config: RunConfig, preloaded_info?: DatasheetInfo): Promise<void> {
+  if (config.image_mode === "webp" || config.image_mode === "png") {
+    await get_sharp();
+  }
+
+  const { doc_type } = parse_url(config.url);
   const start = performance.now();
 
-  const info = await extract_toc(url);
-  const blocks = await fetch_all_blocks(info, doc_type, concurrency);
+  const info = preloaded_info ?? (await extract_toc(config.url));
+  const blocks = await fetch_all_blocks(info, doc_type, config.concurrency);
 
   process.stderr.write(`[*] Converting to Markdown...\n`);
   let markdown = convert_to_markdown(blocks, info);
 
-  if (download_imgs && output) {
-    markdown = await download_images(markdown, output, svg_to_webp, concurrency);
+  if (config.image_mode !== "off" && config.output) {
+    markdown = await download_images(markdown, config.output, config.image_mode, config.concurrency);
   }
 
   const elapsed = ((performance.now() - start) / 1000).toFixed(2);
   process.stderr.write(`[*] Done in ${elapsed}s\n`);
 
-  if (output) {
-    await Bun.write(output, markdown);
-    process.stderr.write(`[*] Written to ${output}\n`);
+  if (config.output) {
+    await Bun.write(config.output, markdown, { createPath: true });
+    process.stderr.write(`[*] Written to ${config.output}\n`);
   } else {
     console.log(markdown);
+  }
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  if (await handle_self_update_command(args)) return;
+  const resolved = await resolve_run_config(args);
+  if (!resolved) return;
+
+  for (let index = 0; index < resolved.targets.length; index++) {
+    const target = resolved.targets[index];
+    if (resolved.targets.length > 1) {
+      process.stderr.write(`\n[*] Processing target ${index + 1}/${resolved.targets.length}: ${target.url}\n`);
+    }
+    const preloaded_info = index === 0 ? resolved.preloaded_info : undefined;
+    await execute_pipeline(target, preloaded_info);
   }
 }
 

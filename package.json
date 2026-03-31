@@ -1,7 +1,11 @@
 {
   "name": "ti-fetch",
-  "version": "1.0.0",
-  "description": "Extract TI datasheets to Markdown",
+  "version": "2.4.0",
+  "description": "Extract TI HTML datasheets to Markdown",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thuvasooriya/ti-fetch.git"
+  },
   "module": "index.ts",
   "type": "module",
   "bin": {
@@ -11,11 +15,13 @@
     "start": "bun run index.ts",
     "build": "bun build --compile --minify --bytecode --external sharp --external @img/* ./index.ts --outfile dist/ti-fetch",
     "build:bundle": "bun build --target=bun --minify --external sharp --external @img/* ./index.ts --outfile dist/ti-fetch",
-    "build:all": "bun run build:linux-x64 && bun run build:linux-arm64 && bun run build:darwin-x64 && bun run build:darwin-arm64",
+    "build:all": "bun run build:linux-x64 && bun run build:linux-arm64 && bun run build:darwin-x64 && bun run build:darwin-arm64 && bun run build:windows-x64 && bun run build:windows-arm64",
     "build:linux-x64": "bun build --compile --minify --bytecode --external sharp --external @img/* --target=bun-linux-x64 ./index.ts --outfile dist/ti-fetch-linux-x64",
     "build:linux-arm64": "bun build --compile --minify --bytecode --external sharp --external @img/* --target=bun-linux-arm64 ./index.ts --outfile dist/ti-fetch-linux-arm64",
     "build:darwin-x64": "bun build --compile --minify --bytecode --external sharp --external @img/* --target=bun-darwin-x64 ./index.ts --outfile dist/ti-fetch-darwin-x64",
-    "build:darwin-arm64": "bun build --compile --minify --bytecode --external sharp --external @img/* --target=bun-darwin-arm64 ./index.ts --outfile dist/ti-fetch-darwin-arm64"
+    "build:darwin-arm64": "bun build --compile --minify --bytecode --external sharp --external @img/* --target=bun-darwin-arm64 ./index.ts --outfile dist/ti-fetch-darwin-arm64",
+    "build:windows-x64": "bun build --compile --minify --bytecode --external sharp --external @img/* --target=bun-windows-x64 ./index.ts --outfile dist/ti-fetch-windows-x64.exe",
+    "build:windows-arm64": "bun build --compile --minify --bytecode --external sharp --external @img/* --target=bun-windows-arm64 ./index.ts --outfile dist/ti-fetch-windows-arm64.exe"
   },
   "devDependencies": {
     "@types/bun": "latest"
